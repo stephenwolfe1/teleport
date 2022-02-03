@@ -4816,16 +4816,13 @@ volumes:
 ---
 kind: pipeline
 type: kubernetes
-name: promote-build
+name: test-version-check
 
 trigger:
   event:
-    - promote
-  target:
-    - production
-  repo:
-    include:
-      - gravitational/*
+    - push
+  branch:
+    - walt/version-check-path-test
 
 workspace:
   path: /go
@@ -4834,79 +4831,6 @@ clone:
   disable: true
 
 steps:
-  - name: Check if commit is tagged
-    image: alpine
-    commands:
-      - "[ -n ${DRONE_TAG} ] || (echo 'DRONE_TAG is not set. Is the commit tagged?' && exit 1)"
-
-  - name: Download artifacts from S3
-    image: amazon/aws-cli
-    environment:
-      AWS_S3_BUCKET:
-        from_secret: AWS_S3_BUCKET
-      AWS_ACCESS_KEY_ID:
-        from_secret: AWS_ACCESS_KEY_ID
-      AWS_SECRET_ACCESS_KEY:
-        from_secret: AWS_SECRET_ACCESS_KEY
-      AWS_REGION: us-west-2
-    commands:
-      - mkdir -p /go/artifacts
-      - aws s3 sync s3://$AWS_S3_BUCKET/teleport/tag/${DRONE_TAG##v}/ /go/artifacts/
-
-  - name: Upload artifacts to production S3
-    image: plugins/s3
-    settings:
-      bucket:
-        from_secret: PRODUCTION_AWS_S3_BUCKET
-      access_key:
-        from_secret: PRODUCTION_AWS_ACCESS_KEY_ID
-      secret_key:
-        from_secret: PRODUCTION_AWS_SECRET_ACCESS_KEY
-      region: us-east-1
-      acl: public-read
-      source: /go/artifacts/*
-      target: teleport/${DRONE_TAG##v}/
-      strip_prefix: /go/artifacts/
-
-  - name: Pull/retag Docker images
-    image: docker
-    settings:
-      docker_staging_username:
-        from_secret: QUAYIO_DOCKER_USERNAME
-      docker_staging_password:
-        from_secret: QUAYIO_DOCKER_PASSWORD
-      docker_production_username:
-        from_secret: PRODUCTION_QUAYIO_DOCKER_USERNAME
-      docker_production_password:
-        from_secret: PRODUCTION_QUAYIO_DOCKER_PASSWORD
-    volumes:
-      - name: dockersock
-        path: /var/run
-    commands:
-      # wait for docker to start
-      - sleep 3
-      - export VERSION=${DRONE_TAG##v}
-      # authenticate with staging credentials
-      - docker login -u="$PLUGIN_DOCKER_STAGING_USERNAME" -p="$PLUGIN_DOCKER_STAGING_PASSWORD" quay.io
-      # pull 'temporary' CI-built images
-      - echo "---> Pulling images for $${VERSION}"
-      - docker pull quay.io/gravitational/teleport-ci:$${VERSION}
-      - docker pull quay.io/gravitational/teleport-ent-ci:$${VERSION}
-      - docker pull quay.io/gravitational/teleport-ent-ci:$${VERSION}-fips
-      # retag images to production naming
-      - echo "---> Tagging images for $${VERSION}"
-      - docker tag quay.io/gravitational/teleport-ci:$${VERSION} quay.io/gravitational/teleport:$${VERSION}
-      - docker tag quay.io/gravitational/teleport-ent-ci:$${VERSION} quay.io/gravitational/teleport-ent:$${VERSION}
-      - docker tag quay.io/gravitational/teleport-ent-ci:$${VERSION}-fips quay.io/gravitational/teleport-ent:$${VERSION}-fips
-      # reauthenticate with production credentials
-      - docker logout quay.io
-      - docker login -u="$PLUGIN_DOCKER_PRODUCTION_USERNAME" -p="$PLUGIN_DOCKER_PRODUCTION_PASSWORD" quay.io
-      # push production images
-      - echo "---> Pushing images for $${VERSION}"
-      - docker push quay.io/gravitational/teleport:$${VERSION}
-      - docker push quay.io/gravitational/teleport-ent:$${VERSION}
-      - docker push quay.io/gravitational/teleport-ent:$${VERSION}-fips
-
   - name: Check out code
     image: docker:git
     commands:
@@ -4914,284 +4838,29 @@ steps:
         mkdir -p /go/src/github.com/gravitational/teleport
         cd /go/src/github.com/gravitational/teleport
         git init && git remote add origin ${DRONE_REMOTE_URL}
-        git fetch origin +refs/tags/${DRONE_TAG}:
-        git checkout -qf FETCH_HEAD
+        git fetch origin
+        git checkout -qf ${DRONE_COMMIT_SHA}
 
-  - name: Download AMI timestamps
-    image: docker
-    environment:
-      AWS_S3_BUCKET:
-        from_secret: AWS_S3_BUCKET
-      AWS_ACCESS_KEY_ID:
-        from_secret: AWS_ACCESS_KEY_ID
-      AWS_SECRET_ACCESS_KEY:
-        from_secret: AWS_SECRET_ACCESS_KEY
-    commands:
-      - apk add --no-cache aws-cli
-      - mkdir -p /go/src/github.com/gravitational/teleport/assets/aws/files/build
-      - aws s3 sync s3://$AWS_S3_BUCKET/teleport/ami/${DRONE_TAG##v}/ /go/src/github.com/gravitational/teleport/assets/aws/files/build
-
-  - name: Make AMIs public
-    image: docker
-    environment:
-      AWS_ACCESS_KEY_ID:
-        from_secret: PRODUCTION_AWS_ACCESS_KEY_ID
-      AWS_SECRET_ACCESS_KEY:
-        from_secret: PRODUCTION_AWS_SECRET_ACCESS_KEY
-    commands:
-      - apk add --no-cache aws-cli bash jq make
-      - cd /go/src/github.com/gravitational/teleport/assets/aws
-      - |
-        make change-amis-to-public-oss
-        make change-amis-to-public-ent
-        make change-amis-to-public-ent-fips
-
-  # Download all previously packaged charts. This is needed to rebuild the
-  # index and re-publish the repository.
-  - name: "Helm: Download chart repository"
-    image: amazon/aws-cli
-    environment:
-      AWS_S3_BUCKET:
-        from_secret: PRODUCTION_CHARTS_AWS_S3_BUCKET
-      AWS_ACCESS_KEY_ID:
-        from_secret: PRODUCTION_CHARTS_AWS_ACCESS_KEY_ID
-      AWS_SECRET_ACCESS_KEY:
-        from_secret: PRODUCTION_CHARTS_AWS_SECRET_ACCESS_KEY
-    commands:
-      - mkdir -p /go/chart
-      - aws s3 sync s3://$AWS_S3_BUCKET/ /go/chart
-
-  - name: "Helm: Package chart repository"
-    image: alpine/helm:latest
-    commands:
-      - cd /go/chart
-      - helm package /go/src/github.com/gravitational/teleport/examples/chart/teleport-cluster
-      - helm package /go/src/github.com/gravitational/teleport/examples/chart/teleport-kube-agent
-      # copy index.html to root of the S3 bucket.
-      - cp /go/src/github.com/gravitational/teleport/examples/chart/index.html /go/chart
-      # this will index all previous versions of the charts downloaded from the S3 bucket,
-      # plus the just-packaged charts listed above
-      - helm repo index /go/chart
-      - ls /go/chart
-
-  - name: "Helm: Publish chart repository to S3"
-    image: plugins/s3
-    settings:
-      bucket:
-        from_secret: PRODUCTION_CHARTS_AWS_S3_BUCKET
-      access_key:
-        from_secret: PRODUCTION_CHARTS_AWS_ACCESS_KEY_ID
-      secret_key:
-        from_secret: PRODUCTION_CHARTS_AWS_SECRET_ACCESS_KEY
-      region: us-east-2
-      acl: public-read
-      source: /go/chart/*
-      target: /
-      strip_prefix: /go/chart
-
-  # NOTE: all mandatory steps for a release promotion need to go BEFORE this
-  # step, as there is a chance that everything afterwards will be skipped.
-  #
-  # this step exits early and skips all remaining steps in the pipeline if the
-  # tag looks like a pre-release, to avoid pushing pre-release RPMs and DEBs to
-  # our yum / apt repos.
   - name: Check if tag is prerelease
     image: golang:1.17-alpine
     commands:
+      - export DRONE_TAG=v0.0.0
       - cd /go/src/github.com/gravitational/teleport/build.assets/version-check
-      - go run . -tag ${DRONE_TAG} -check prerelease || (echo '---> Not publishing ${DRONE_REPO} packages to RPM and DEB repos' && exit 78)
+      - go run . -tag $DRONE_TAG -check prerelease || (echo '---> Not publishing ${DRONE_REPO} packages to RPM and DEB repos' && exit 78)
 
-  - name: Download RPM repo contents
-    image: amazon/aws-cli
-    environment:
-      AWS_S3_BUCKET:
-        from_secret: RPMREPO_AWS_S3_BUCKET
-      AWS_ACCESS_KEY_ID:
-        from_secret: RPMREPO_AWS_ACCESS_KEY_ID
-      AWS_SECRET_ACCESS_KEY:
-        from_secret: RPMREPO_AWS_SECRET_ACCESS_KEY
-    volumes:
-      - name: rpmrepo
-        path: /rpmrepo
-    commands:
-    - mkdir -p /rpmrepo/teleport/cache
-    # we explicitly want to delete anything present locally which has been deleted
-    # from the upstream S3 bucket
-    - aws s3 sync s3://$AWS_S3_BUCKET/teleport/ /rpmrepo/teleport/ --delete
-    - mkdir -p /rpmrepo/teleport/${DRONE_TAG##v}
-    - cp -a /go/artifacts/*.rpm /rpmrepo/teleport/${DRONE_TAG##v}/
-
-  # we do this using a CentOS 7 container to make sure that the repo files are
-  # compatible with older versions, also there's no createrepo package in alpine main
-  - name: Regenerate RPM repo metadata
-    image: centos:7
-    volumes:
-      - name: rpmrepo
-        path: /rpmrepo
-    commands:
-    - yum -y install createrepo
-    - createrepo --cachedir /rpmrepo/teleport/cache --update /rpmrepo/teleport
-
-  # This step requires centos:8 to get gpg 2.2+
-  # centos:7's gpg 2.0 doesn't understand the format of GPG_RPM_SIGNING_ARCHIVE
-  - name: Sign RPM repo metadata
-    image: centos:8
-    volumes:
-      - name: rpmrepo
-        path: /rpmrepo
-      # for in-memory tmpfs for key material
-      - name: tmpfs
-        path: /tmpfs
-    environment:
-      GNUPGHOME: /tmpfs/gnupg
-      GPG_RPM_SIGNING_ARCHIVE:
-        from_secret: GPG_RPM_SIGNING_ARCHIVE
-    commands:
-      - |
-        # extract signing key
-        mkdir -m0700 $GNUPGHOME
-        echo "$GPG_RPM_SIGNING_ARCHIVE" | base64 -d | tar -xzf - -C $GNUPGHOME
-        chown -R root:root $GNUPGHOME
-      # Sign rpm repo metadata (yum clients will automatically look for and verify repodata/repomd.xml.asc)
-      - gpg --batch --yes --detach-sign --armor /rpmrepo/teleport/repodata/repomd.xml
-      - cat /rpmrepo/teleport/repodata/repomd.xml.asc
-      - rm -rf $GNUPGHOME
-
-  - name: Sync RPM repo changes to S3
-    image: amazon/aws-cli
-    environment:
-      AWS_S3_BUCKET:
-        from_secret: RPMREPO_AWS_S3_BUCKET
-      AWS_ACCESS_KEY_ID:
-        from_secret: RPMREPO_AWS_ACCESS_KEY_ID
-      AWS_SECRET_ACCESS_KEY:
-        from_secret: RPMREPO_AWS_SECRET_ACCESS_KEY
-    volumes:
-      - name: rpmrepo
-        path: /rpmrepo
-    commands:
-    - aws s3 sync /rpmrepo/teleport/ s3://$AWS_S3_BUCKET/teleport/
-
-  # This step skips all remaining steps in the pipeline if the tag
-  # is not the highest semver *ever* released, to avoid publishing DEBs
-  # that would cause apt users to downgrade. For more info see:
-  #   https://github.com/gravitational/teleport/issues/8166
   - name: Check if tag is latest
     image: golang:1.17-alpine
     commands:
+      - export DRONE_TAG=v0.0.0
       - cd /go/src/github.com/gravitational/teleport/build.assets/version-check
-      - go run . -tag ${DRONE_TAG} -check latest || (echo '---> Not publishing ${DRONE_REPO} packages to DEB repo' && exit 78)
-
-  - name: Download DEB repo contents
-    image: amazon/aws-cli
-    environment:
-      AWS_S3_BUCKET:
-        from_secret: DEBREPO_AWS_S3_BUCKET
-      AWS_ACCESS_KEY_ID:
-        from_secret: DEBREPO_AWS_ACCESS_KEY_ID
-      AWS_SECRET_ACCESS_KEY:
-        from_secret: DEBREPO_AWS_SECRET_ACCESS_KEY
-    volumes:
-      - name: debrepo
-        path: /debrepo
-    commands:
-    # we explicitly want to delete anything present locally which has been deleted
-    # from the upstream S3 bucket
-    - mkdir -p /debrepo/teleport
-    - aws s3 sync s3://$AWS_S3_BUCKET/teleport /debrepo/teleport --delete
-
-  - name: Build DEB repo
-    image: ubuntu:20.04
-    environment:
-      DEBIAN_FRONTEND: noninteractive
-      GNUPGHOME: /tmpfs/gnupg
-      GPG_RPM_SIGNING_ARCHIVE:
-        from_secret: GPG_RPM_SIGNING_ARCHIVE
-    volumes:
-      - name: dockersock
-        path: /var/run
-      - name: debrepo
-        path: /debrepo
-      # for in-memory tmpfs for key material
-      - name: tmpfs
-        path: /tmpfs
-    commands:
-      - |
-        # install needed tools
-        apt-get -y update && apt-get -y install curl gzip gnupg2 reprepro tar
-      - |
-        # write config files
-        mkdir -p /go/reprepro/teleport/conf /go/reprepro/teleport/public
-        cat << EOF > /go/reprepro/teleport/conf/distributions
-        Origin: teleport
-        Label: teleport
-        Codename: stable
-        Architectures: i386 amd64 arm arm64
-        Components: main
-        Description: apt repository for teleport
-        SignWith: 6282C411
-        EOF
-        cat << EOF > /go/reprepro/teleport/conf/options
-        verbose
-        basedir /go/reprepro/teleport
-        EOF
-      - |
-        # extract signing key
-        mkdir -m0700 $GNUPGHOME
-        echo "$GPG_RPM_SIGNING_ARCHIVE" | base64 -d | tar -xzf - -C $GNUPGHOME
-        chown -R root:root $GNUPGHOME
-      - |
-        # create repo
-        cd /go/reprepro/teleport
-        reprepro --outdir /go/reprepro/teleport/public includedeb stable /go/artifacts/teleport*.deb
-      - |
-        # clean up gnupg
-        rm -rf $GNUPGHOME
-      - |
-        # copy artifacts to PVC
-        cp -r /go/reprepro/teleport /debrepo/
-
-  - name: Sync DEB repo changes to S3
-    image: amazon/aws-cli
-    environment:
-      AWS_S3_BUCKET:
-        from_secret: DEBREPO_AWS_S3_BUCKET
-      AWS_ACCESS_KEY_ID:
-        from_secret: DEBREPO_AWS_ACCESS_KEY_ID
-      AWS_SECRET_ACCESS_KEY:
-        from_secret: DEBREPO_AWS_SECRET_ACCESS_KEY
-    volumes:
-      - name: debrepo
-        path: /debrepo
-    commands:
-    - aws s3 sync /debrepo/teleport/ s3://$AWS_S3_BUCKET/teleport/
-
-services:
-  - name: Start Docker
-    image: docker:dind
-    privileged: true
-    volumes:
-      - name: dockersock
-        path: /var/run
-      - name: tmpfs
-        path: /tmpfs
+      - go run . -tag $DRONE_TAG -check latest || (echo '---> Not publishing ${DRONE_REPO} packages to DEB repo' && exit 78)
 
 volumes:
-  - name: dockersock
-    temp: {}
   - name: tmpfs
     temp:
       medium: memory
-  # these persistent volumes cache RPMs/DEBs near Drone so that we don't need to download the
-  # entire repo contents from S3 every time to build the repo, we just sync any differences
-  - name: rpmrepo
-    claim:
-      name: drone-s3-rpmrepo-pvc
-  - name: debrepo
-    claim:
-      name: drone-s3-debrepo-pvc
 ---
 kind: signature
-hmac: 545ff7529ef63acaf7e2fb71b14a1bf577931fc06c247c5485b52ea16f3c18c8
+hmac: 2d32d04380e3cab17b2c325eb7ed1c71d4818276547e0a02187c3bebb910e561
 
 ...
