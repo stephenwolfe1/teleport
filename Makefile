@@ -450,10 +450,10 @@ docs-test-whitespace:
 #
 # Builds some tooling for filtering and displaying test progress/output/etc
 #
-RENDER_TESTS := ${abspath ./build.assets/tooling/bin/render-tests}
-$(RENDER_TESTS): $(wildcard ./build.assets/tooling/cmd/render-tests/*.go)
-	go build -o "$@" ./build.assets/tooling/cmd/render-tests
-
+TOOLINGDIR := ${abspath ./build.assets/tooling}
+RENDER_TESTS := $(TOOLINGDIR)/bin/render-tests
+$(RENDER_TESTS): $(wildcard $(TOOLINGDIR)/cmd/render-tests/*.go)
+	cd $(TOOLINGDIR) && go build -o "$@" ./cmd/render-tests
 #
 # Runs all Go/shell tests, called by CI/CD.
 #
