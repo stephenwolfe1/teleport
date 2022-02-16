@@ -1,0 +1,45 @@
+---
+title: Teleport with GitHub.
+description: How to use SSH key extensions with Teleport and GitHub.
+h1: Use SSH Key extensions.
+---
+
+## Prerequisites
+
+- Teleport v(=teleport.version) Open Source or Enterprise.
+
+## Step 1. Import the Teleport CA into Github
+
+In order to export the Teleport CA, execute
+
+```code
+tctl auth export > teleport.ca
+```
+
+Then follow the steps outlined[here](https://docs.github.com/en/organizations/managing-git-access-to-your-organizations-repositories/managing-your-organizations-ssh-certificate-authorities),
+to import the exported Teleport CA
+
+## Step 2. Configure key extensions to be included in key generation.
+
+Create or update a role to include the `cert_extensions` option.
+
+```yaml
+kind: role
+metadata:
+  name: developer
+spec:
+  options:
+     cert_extensions:
+       - type: ssh
+         mode: extension
+         name: login@github.com
+         value: "{{ external.logins }}"
+```
+
+## Step 3. Issue a user certificate.
+
+A user certificate may be issued with the following command 
+
+```code
+tctl auth sign --out out.cer --user=$USERNAME
+```
