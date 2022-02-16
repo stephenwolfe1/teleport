@@ -16,13 +16,15 @@ Make sure that the following tools are installed on your local machine.
 |Tool|Purpose|Installation link|
 |---|---|---|
 |minikube|Local Kubernetes deployment tool|[Install minikube](https://minikube.sigs.k8s.io/docs/start/)|
-|Helm|Kubernetes package manager|[Install Helm](https://helm.sh/docs/intro/install/)
-|kubectl|Kubernetes admin CLI|[Install kubectl](https://kubernetes.io/docs/tasks/tools/)
+|Helm|Kubernetes package manager|[Install Helm](https://helm.sh/docs/intro/install/)|
+|kubectl|Kubernetes admin CLI|[Install kubectl](https://kubernetes.io/docs/tasks/tools/)|
+|tctl|Teleport admin CLI (part of the `teleport` binary)|[Install Teleport](https://goteleport.com/docs/installation/)|
 
 To run minikube, you will need to install a supported driver, i.e., a local virtualization or isolation environment that can run the cluster. Docker is a good cross-platform solution. You can read about all supported platforms here:
 
 [Drivers](https://minikube.sigs.k8s.io/docs/drivers/)
 
+You should also install a one-time passcode (OTP) application like Authy on your mobile device.
 
 ## Step 1/ Deploy resources
 
@@ -122,8 +124,47 @@ If installing the dashboard leads to an unexpected result, check the following d
 </Notice>
 
 ## Step 2/ Create a user
+We will create a Teleport user who can access the Kubernetes dashboard from outside the cluster. To do this, you use the `tctl` administrative tool, which manages the Teleport Auth Service.
 
-{/* TODO */}
+Run the following commands to get the name of the pod that runs the Teleport Auth Service and execute a `tctl` command to create a user:
+
+```code
+# We will use this variable for subsequent commands
+$ PROXY_POD=$(kubectl get po -l app=teleport-cluster -o jsonpath='{.items[0].metadata.name}')
+$ kubectl exec $PROXY_POD -- tctl users add --roles=access appuser
+User "appuser" has been created but requires a password. Share this URL with the user to complete user setup, link is valid for 1h:
+https://teleport-cluster:443/web/invite/<token>
+
+NOTE: Make sure teleport-cluster:443 points at a Teleport proxy which users can access.
+```
+
+Next, open a browser at `https://localhost/web/invite/<token>`, copying the token from the URl returned by the `tctl` command you executed. minikube's reverse tunnel will allow you to access the Teleport Proxy Service on your local machine's default HTTPS port.
+
+(!docs/pages/includes/insecure-certificate.mdx!)
+
+![Teleport User Registration](../../img/quickstart/login.png)
+
+In the Teleport Web UI, enter a password and scan the QR code with your OTP application to create your user. 
+
+<Details title="Don't want to use MFA in your local demo?" opened={false}>
+We recommend requiring a second factor for all Teleport users. However, for convenience, you can run the following command to create a dynamic configuration resource that disables MFA for your demo user:
+
+```code
+$ kubectl exec -i $PROXY_POD -- bash -c "cat<<EOF>>/home/cp.yaml
+kind: cluster_auth_preference
+version: v2
+metadata:
+  name: cluster-auth-preference
+spec:
+  type: local
+  second_factor: 'off'
+EOF
+tctl create --force --confirm /home/cp.yaml" 
+```
+</Details>
+
+After signing in, you will navigate to the Teleport Web UI.
+
 
 ## Step 3/ Enable access to the Kubernetes dashboard
 {/* TODO */}
