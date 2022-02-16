@@ -271,6 +271,16 @@ func (s *WebSuite) SetUpTest(c *C) {
 	})
 	c.Assert(err, IsNil)
 
+	caWatcher, err := services.NewCertAuthorityWatcher(s.ctx, services.CertAuthorityWatcherConfig{
+		ResourceWatcherConfig: services.ResourceWatcherConfig{
+			Component: teleport.ComponentProxy,
+			Client:    s.proxyClient,
+		},
+		Types: []types.CertAuthType{types.HostCA, types.UserCA},
+	})
+	c.Assert(err, IsNil)
+	defer caWatcher.Close()
+
 	revTunServer, err := reversetunnel.NewServer(reversetunnel.Config{
 		ID:                    node.ID(),
 		Listener:              revTunListener,
@@ -284,6 +294,7 @@ func (s *WebSuite) SetUpTest(c *C) {
 		DirectClusters:        []reversetunnel.DirectCluster{{Name: s.server.ClusterName(), Client: s.proxyClient}},
 		DataDir:               c.MkDir(),
 		LockWatcher:           proxyLockWatcher,
+		CertAuthorityWatcher:  caWatcher,
 	})
 	c.Assert(err, IsNil)
 	s.proxyTunnel = revTunServer
