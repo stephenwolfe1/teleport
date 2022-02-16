@@ -167,6 +167,38 @@ After signing in, you will navigate to the Teleport Web UI.
 
 
 ## Step 3/ Enable access to the Kubernetes dashboard
+The Teleport Application service proxies traffic to your applications so that you can ensure secure, auditable, and configurable access. We will add a Node to your Teleport cluster that runs the Application Service, then configure it to enable users to access your Kubernetes dashboard from outside your cluster.
+
+Before the Application Service Node can join your Teleport cluster, the Telport Auth Service will need to verify that it belongs to your organization. To do so, create a join token via the Auth Service and use it when starting the Application Service.
+
+Generate the join token, which is specific to the Kuberneted dashboard:
+
+```code
+$ DASH_ADDR=$(kubectl -n kubernetes-dashboard get service kubernetes-dashboard -o jsonpath="{.spec.clusterIP}")
+$ kubectl exec -i $PROXY_POD -- tctl tokens add \
+--type=app \
+--app-name=kube-dash \
+--app-uri=$DASH_ADDR
+The invite token: <token>.
+This token will expire in 60 minutes.
+```
+
+Copy the join token to an environment variable and launch the Teleport Application service:
+
+```code
+# If you need to retrieve this again you can run "tctl tokens ls"
+$ JOIN_TOKEN=<token>
+$ PROXY_ADDR=$(kubectl get service teleport-cluster -o jsonpath="{.spec.clusterIP}")
+$ helm install teleport-kube-agent teleport/teleport-kube-agent \
+  --namespace teleport-cluster \
+  --set roles=app \
+  --set proxyAddr=${PROXY_ADDR?} \
+  --set authToken=${JOIN_TOKEN?} \
+  --set apps='[{"name":"kube-dash","uri":"${DASH_ADDR?}"}]'
+```
+
+
+
 {/* TODO */}
 
 ## Next steps
