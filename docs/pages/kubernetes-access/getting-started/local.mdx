@@ -191,10 +191,15 @@ $ JOIN_TOKEN=<token>
 $ PROXY_ADDR=$(kubectl get service teleport-cluster -o jsonpath="{.spec.clusterIP}")
 $ helm install teleport-kube-agent teleport/teleport-kube-agent \
   --namespace teleport-cluster \
-  --set roles=app \
-  --set proxyAddr=${PROXY_ADDR?} \
-  --set authToken=${JOIN_TOKEN?} \
-  --set apps='[{"name":"kube-dash","uri":"${DASH_ADDR?}"}]'
+  -f <(cat<<EOF
+  roles: app
+  proxyAddr: ${PROXY_ADDR?}
+  authToken: ${JOIN_TOKEN?}
+  apps:
+    - name: kube-dash
+      uri: \"${DASH_ADDR?}\"
+  EOF
+  )
 ```
 
 
