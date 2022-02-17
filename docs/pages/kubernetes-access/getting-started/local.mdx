@@ -47,7 +47,7 @@ $ helm repo add teleport https://charts.releases.teleport.dev
 Install the `teleport-cluster` chart. This deploys the Teleport Auth Service and Proxy Service. The Proxy Service handles authentication requests from users, executes cryptographic challenges against the Auth Service, directs traffic to resources within the cluster.
 
 ```code
-$ CLUSTER_NAME="localhost"
+$ CLUSTER_NAME="teleport-cluster.teleport-cluster.svc.cluster.local"
 $ helm install teleport-cluster teleport/teleport-cluster --create-namespace --namespace=teleport-cluster --set clusterName=${CLUSTER_NAME?}
 $ kubectl config set-context --current --namespace teleport-cluster
 
@@ -133,12 +133,10 @@ Run the following commands to get the name of the pod that runs the Teleport Aut
 $ PROXY_POD=$(kubectl get po -l app=teleport-cluster -o jsonpath='{.items[0].metadata.name}')
 $ kubectl exec $PROXY_POD -- tctl users add --roles=access appuser
 User "appuser" has been created but requires a password. Share this URL with the user to complete user setup, link is valid for 1h:
-https://localhost:443/web/invite/<token>
-
-NOTE: Make sure localhost:443 points at a Teleport proxy which users can access.
+https://teleport-cluster.teleport-cluster.svc.cluster.local:443<token>
 ```
 
-Next, open a browser at `https://localhost:443/web/invite/<token>`, copying the URL from the output of the `tctl` command you executed. minikube's reverse tunnel will allow you to access the Teleport Proxy Service on your local machine's default HTTPS port.
+Next, open a browser at `https://localhost:443/web/invite/<token>`, copying the token from the output of the `tctl` command you executed. minikube's reverse tunnel will allow you to access the Teleport Proxy Service on your local machine's default HTTPS port.
 
 (!docs/pages/includes/insecure-certificate.mdx!)
 
@@ -189,7 +187,7 @@ Copy the join token so you can assign it to `JOIN_TOKEN` below, then launch the 
 ```code
 # If you need to retrieve this again you can run "tctl tokens ls"
 $ JOIN_TOKEN=<token>
-$ PROXY_ADDR=$(kubectl get service teleport-cluster -o jsonpath="{.spec.clusterIP}")
+$ PROXY_ADDR="$(kubectl get service teleport-cluster -o jsonpath="{.spec.clusterIP}"):443"
 $ helm install teleport-kube-agent teleport/teleport-kube-agent \
   --namespace teleport-cluster \
   -f <(cat<<EOF
@@ -199,13 +197,17 @@ $ helm install teleport-kube-agent teleport/teleport-kube-agent \
   apps:
     - name: kube-dash
       uri: \"${DASH_ADDR?}\"
-  EOF
-  )
+  insecureSkipProxyTLSVerify: true
+EOF
+)
 ```
 
+{/* TODO: Add a warning re: `insecureSkipProxyTLSVerify` */}
 
+You will now see the Kubernetes dashboard as connected to your cluster.
 
-{/* TODO */}
+![An application connected to your Teleport cluster](../../../img/connected-app.png)
+
 
 ## Next steps
 {/* TODO: link to other Kubernetes guides */}
