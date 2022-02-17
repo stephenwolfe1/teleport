@@ -47,6 +47,7 @@ $ helm repo add teleport https://charts.releases.teleport.dev
 Install the `teleport-cluster` chart. This deploys the Teleport Auth Service and Proxy Service. The Proxy Service handles authentication requests from users, executes cryptographic challenges against the Auth Service, directs traffic to resources within the cluster.
 
 ```code
+$ CLUSTER_NAME="localhost"
 $ helm install teleport-cluster teleport/teleport-cluster --create-namespace --namespace=teleport-cluster --set clusterName=${CLUSTER_NAME?}
 $ kubectl config set-context --current --namespace teleport-cluster
 
@@ -56,14 +57,13 @@ Verify that Teleport is running.
 $ kubectl get pods
 NAME                               READY   STATUS    RESTARTS   AGE
 teleport-cluster-b9dc6c68b-d75fb   1/1     Running   0          46s
-$ kubectl get services
-NAME               TYPE           CLUSTER-IP       EXTERNAL-IP   PORT(S)                                                                     AGE
-teleport-cluster   LoadBalancer   10.107.218.212   <pending>     443:32143/TCP,3023:30618/TCP,3026:32750/TCP,3024:32406/TCP,3036:30687/TCP   2m2s
 ```
 
 ### Expose the Proxy Service to your local machine
 
-The `teleport-cluster` service uses a `LoadBalancer` type, meaning that your platform needs to supply a load balancer to route traffic to the service. The `minikube tunnel` command provides a load balancer and establishes a reverse SSH tunnel to ports on your local machine so you can access the Teleport Proxy Service.
+The `teleport-cluster` service uses a `LoadBalancer` type, meaning that your platform needs to supply a load balancer to route traffic to the service.
+
+The `minikube tunnel` command provides a load balancer and establishes a reverse SSH tunnel to ports on your local machine so you can access the Teleport Proxy Service.
 
 Open a new terminal and run the following command to create a reverse tunnel. In this case, the tunnel forwards port 443, so you will need to enter your password.
 
@@ -117,7 +117,7 @@ dashboard-metrics-scraper   ClusterIP   10.100.9.163   <none>        8000/TCP   
 kubernetes-dashboard        ClusterIP   10.100.80.65   <none>        443/TCP    8s
 ```
 
-Notice that the `kubernetes-dashboard` service has an open HTTPS port but is not accessible outside the cluster. By enabling Teleport Application Access, we will alow users to securely access the dashboard.
+Notice that the `kubernetes-dashboard` service has an open HTTPS port but is not accessible outside the cluster (i.e., it has no external IP). By enabling Teleport Application Access, we will alow users to securely access the dashboard.
 
 <Notice type="tip">
 If installing the dashboard leads to an unexpected result, check the following documentation for updated installation steps: [Deploying the Dashboard UI](https://kubernetes.io/docs/tasks/access-application-cluster/web-ui-dashboard/#deploying-the-dashboard-ui).
@@ -133,12 +133,12 @@ Run the following commands to get the name of the pod that runs the Teleport Aut
 $ PROXY_POD=$(kubectl get po -l app=teleport-cluster -o jsonpath='{.items[0].metadata.name}')
 $ kubectl exec $PROXY_POD -- tctl users add --roles=access appuser
 User "appuser" has been created but requires a password. Share this URL with the user to complete user setup, link is valid for 1h:
-https://teleport-cluster:443/web/invite/<token>
+https://localhost:443/web/invite/<token>
 
-NOTE: Make sure teleport-cluster:443 points at a Teleport proxy which users can access.
+NOTE: Make sure localhost:443 points at a Teleport proxy which users can access.
 ```
 
-Next, open a browser at `https://localhost/web/invite/<token>`, copying the token from the URl returned by the `tctl` command you executed. minikube's reverse tunnel will allow you to access the Teleport Proxy Service on your local machine's default HTTPS port.
+Next, open a browser at `https://localhost:443/web/invite/<token>`, copying the URL from the output of the `tctl` command you executed. minikube's reverse tunnel will allow you to access the Teleport Proxy Service on your local machine's default HTTPS port.
 
 (!docs/pages/includes/insecure-certificate.mdx!)
 
@@ -147,7 +147,7 @@ Next, open a browser at `https://localhost/web/invite/<token>`, copying the toke
 In the Teleport Web UI, enter a password and scan the QR code with your OTP application to create your user. 
 
 <Details title="Don't want to use MFA in your local demo?" opened={false}>
-We recommend requiring a second factor for all Teleport users. However, for convenience, you can run the following command to create a dynamic configuration resource that disables MFA for your demo user:
+We recommend requiring a second factor for all Teleport users. However, for convenience while setting up your local demo, you can run the following command to create a dynamic configuration resource that disables MFA for your demo user:
 
 ```code
 $ kubectl exec -i $PROXY_POD -- bash -c "cat<<EOF>>/home/cp.yaml
@@ -181,9 +181,10 @@ $ kubectl exec -i $PROXY_POD -- tctl tokens add \
 --app-uri=$DASH_ADDR
 The invite token: <token>.
 This token will expire in 60 minutes.
+...
 ```
 
-Copy the join token to an environment variable and launch the Teleport Application service:
+Copy the join token so you can assign it to `JOIN_TOKEN` below, then launch the Teleport Application service:
 
 ```code
 # If you need to retrieve this again you can run "tctl tokens ls"
