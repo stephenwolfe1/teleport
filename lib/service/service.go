@@ -1797,6 +1797,8 @@ func (process *TeleportProcess) initSSH() error {
 	})
 
 	var agentPool *reversetunnel.AgentPool
+	var connectedProxies *reversetunnel.ConnectedProxies
+
 	var conn *Connector
 	var ebpf bpf.BPF
 	var rm restricted.Manager
@@ -1935,6 +1937,12 @@ func (process *TeleportProcess) initSSH() error {
 			return trace.Wrap(err)
 		}
 
+		// Initialize connected proxy before creating ssh server or agent pool.
+		connectedProxies = reversetunnel.NewConnectedProxies()
+
+		// TODO(david): Need to figure out how to:
+		// initialize ssh server and agentpool, then the agentpool connected proxy to the
+		// ssh server and pass the ssh server to the agentpool.
 		s, err = regular.New(cfg.SSH.Addr,
 			cfg.Hostname,
 			[]ssh.Signer{conn.ServerIdentity.KeySigner},
@@ -1963,6 +1971,7 @@ func (process *TeleportProcess) initSSH() error {
 			regular.SetAllowTCPForwarding(cfg.SSH.AllowTCPForwarding),
 			regular.SetLockWatcher(lockWatcher),
 			regular.SetX11ForwardingConfig(cfg.SSH.X11),
+			regular.SetConnectedProxies(connectedProxies),
 		)
 		if err != nil {
 			return trace.Wrap(err)
@@ -2005,15 +2014,16 @@ func (process *TeleportProcess) initSSH() error {
 			agentPool, err = reversetunnel.NewAgentPool(
 				process.ExitContext(),
 				reversetunnel.AgentPoolConfig{
-					Component:   teleport.ComponentNode,
-					HostUUID:    conn.ServerIdentity.ID.HostUUID,
-					Resolver:    conn.TunnelProxyResolver(),
-					Client:      conn.Client,
-					AccessPoint: conn.Client,
-					HostSigner:  conn.ServerIdentity.KeySigner,
-					Cluster:     conn.ServerIdentity.Cert.Extensions[utils.CertExtensionAuthority],
-					Server:      s,
-					FIPS:        process.Config.FIPS,
+					Component:        teleport.ComponentNode,
+					HostUUID:         conn.ServerIdentity.ID.HostUUID,
+					Resolver:         conn.TunnelProxyResolver(),
+					Client:           conn.Client,
+					AccessPoint:      conn.Client,
+					HostSigner:       conn.ServerIdentity.KeySigner,
+					Cluster:          conn.ServerIdentity.Cert.Extensions[utils.CertExtensionAuthority],
+					Server:           s,
+					FIPS:             process.Config.FIPS,
+					ConnectedProxies: connectedProxies,
 				})
 			if err != nil {
 				return trace.Wrap(err)

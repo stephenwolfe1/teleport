@@ -19,6 +19,7 @@ package srv
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"time"
 
 	"github.com/gravitational/teleport"
@@ -52,6 +53,15 @@ func (k KeepAliveState) String() string {
 	default:
 		return fmt.Sprintf("unknown state %v", int(k))
 	}
+}
+
+// ConnectedProxies represents the proxy an agent is currently connected to.
+type ConnectedProxies interface {
+	// ProxyID is the proxy id an agent is currently connected to.
+	ProxyIDs() []string
+	// WaitForChange returns a channel that sends a signal if the proxy id has
+	// changes since the last time it was read.
+	WaitForChange() <-chan struct{}
 }
 
 const (
@@ -151,6 +161,8 @@ func NewHeartbeat(cfg HeartbeatConfig) (*Heartbeat, error) {
 		checkTicker: cfg.Clock.NewTicker(cfg.CheckPeriod),
 		announceC:   make(chan struct{}, 1),
 		sendC:       make(chan struct{}, 1),
+		nonceID:     rand.Uint64(),
+		nonce:       1,
 	}
 	h.Debugf("Starting %v heartbeat with announce period: %v, keep-alive period %v, poll period: %v", cfg.Mode, cfg.KeepAlivePeriod, cfg.AnnouncePeriod, cfg.CheckPeriod)
 	return h, nil
@@ -163,7 +175,7 @@ type GetServerInfoFn func() (types.Resource, error)
 type HeartbeatConfig struct {
 	// Mode sets one of the proxy, auth or node modes.
 	Mode HeartbeatMode
-	// Context is parent context that signals
+	// Context is parent context that signalsmake u
 	// heartbeat cancel
 	Context context.Context
 	// Component is a name of component used in logs
@@ -190,6 +202,8 @@ type HeartbeatConfig struct {
 	// OnHeartbeat is called after every heartbeat. A non-nil error is passed
 	// when a heartbeat fails.
 	OnHeartbeat func(error)
+
+	ConnectedProxies ConnectedProxies
 }
 
 // CheckAndSetDefaults checks and sets default values
@@ -257,7 +271,9 @@ type Heartbeat struct {
 	announceC chan struct{}
 	// sendC is event channel used to trigger
 	// new announces
-	sendC chan struct{}
+	sendC   chan struct{}
+	nonceID uint64
+	nonce   uint64
 }
 
 // Run periodically calls to announce presence,
@@ -267,6 +283,12 @@ func (h *Heartbeat) Run() error {
 		h.reset(HeartbeatStateInit)
 		h.checkTicker.Stop()
 	}()
+
+	proxyChange := make(<-chan struct{})
+	if h.ConnectedProxies != nil {
+		proxyChange = h.ConnectedProxies.WaitForChange()
+	}
+
 	for {
 		err := h.fetchAndAnnounce()
 		if err != nil {
@@ -275,8 +297,13 @@ func (h *Heartbeat) Run() error {
 		h.OnHeartbeat(err)
 		select {
 		case <-h.checkTicker.Chan():
+			h.Debugf("check timer triggered.")
 		case <-h.sendC:
 			h.Debugf("Asked check out of cycle")
+		// TODO(david): this may be agressive. consider having a backoff if
+		// too many changes are coming through.
+		case <-proxyChange:
+			h.Debugf("Proxy state change received.")
 		case <-h.cancelCtx.Done():
 			h.Debugf("Heartbeat exited.")
 			return nil
@@ -320,6 +347,33 @@ func (h *Heartbeat) reset(state KeepAliveState) {
 	}
 }
 
+func (h *Heartbeat) updateProxyIDs(resource types.Resource) {
+	if h.ConnectedProxies == nil {
+		return
+	}
+	proxiedResource, ok := resource.(types.ProxiedService)
+	if !ok {
+		return
+	}
+
+	proxiedResource.SetProxyIDs(h.ConnectedProxies.ProxyIDs())
+}
+
+func (h *Heartbeat) updateCurrent(resource types.Resource) {
+	h.current = resource
+	if h.ConnectedProxies == nil {
+		return
+	}
+	proxiedResource, ok := resource.(types.ProxiedService)
+	if !ok {
+		return
+	}
+
+	proxiedResource.SetNonceID(h.nonceID)
+	proxiedResource.SetNonce(h.nonce)
+	h.nonce++
+}
+
 // fetch, if succeeded updates or sets current server
 // to the last received server
 func (h *Heartbeat) fetch() error {
@@ -330,10 +384,13 @@ func (h *Heartbeat) fetch() error {
 		h.reset(HeartbeatStateInit)
 		return trace.Wrap(err)
 	}
+
+	h.updateProxyIDs(server)
+
 	switch h.state {
 	// in case of successful state fetch, move to announce from init
 	case HeartbeatStateInit:
-		h.current = server
+		h.updateCurrent(server)
 		h.reset(HeartbeatStateAnnounce)
 		return nil
 		// nothing to do in announce state
@@ -342,14 +399,14 @@ func (h *Heartbeat) fetch() error {
 	case HeartbeatStateAnnounceWait:
 		// time to announce
 		if h.Clock.Now().UTC().After(h.nextAnnounce) {
-			h.current = server
+			h.updateCurrent(server)
 			h.reset(HeartbeatStateAnnounce)
 			return nil
 		}
 		result := services.CompareServers(h.current, server)
 		// server update happened, time to announce
 		if result == services.Different {
-			h.current = server
+			h.updateCurrent(server)
 			h.reset(HeartbeatStateAnnounce)
 		}
 		return nil
@@ -367,7 +424,7 @@ func (h *Heartbeat) fetch() error {
 		result := services.CompareServers(h.current, server)
 		// server update happened, move to announce
 		if result == services.Different {
-			h.current = server
+			h.updateCurrent(server)
 			h.reset(HeartbeatStateAnnounce)
 		}
 		return nil
