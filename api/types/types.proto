@@ -1965,7 +1965,7 @@ message LocalAuthSecrets {
     // Deprecated 2nd factor fields, use MFA below instead.
     string TOTPKey = 2 [ (gogoproto.jsontag) = "totp_key,omitempty" ];
     reserved 3; // U2FRegistrationData U2FRegistration
-    reserved 4; // uint32 U2FCounter = 4
+    reserved 4; // uint32 U2FCounter
 
     repeated MFADevice MFA = 5 [ (gogoproto.jsontag) = "mfa,omitempty" ];
     // Webauthn holds settings necessary for webauthn local auth.
