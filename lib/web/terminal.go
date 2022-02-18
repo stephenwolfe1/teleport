@@ -35,7 +35,6 @@ import (
 	"github.com/gravitational/teleport/api/types"
 	wanlib "github.com/gravitational/teleport/lib/auth/webauthn"
 
-	"github.com/gravitational/teleport/lib/auth"
 	"github.com/gravitational/teleport/lib/client"
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/events"
@@ -345,7 +344,7 @@ func (t *TerminalHandler) promptMFAChallenge(ws *websocket.Conn) client.PromptMF
 		}
 
 		// Send the challenge over the socket.
-		chalEnc, err := json.Marshal(&auth.MFAAuthenticateChallenge{
+		chalEnc, err := json.Marshal(&client.MFAAuthenticateChallenge{
 			WebauthnChallenge: wanlib.CredentialAssertionFromProto(c.WebauthnChallenge),
 		})
 		if err != nil {
