@@ -22,7 +22,6 @@ import (
 	"crypto/rsa"
 	"encoding/pem"
 	"errors"
-	"github.com/gravitational/teleport/lib/services"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -37,6 +36,7 @@ import (
 	"github.com/gravitational/teleport/lib/defaults"
 	"github.com/gravitational/teleport/lib/fixtures"
 	"github.com/gravitational/teleport/lib/service"
+	"github.com/gravitational/teleport/lib/services"
 	"github.com/gravitational/teleport/lib/tlsca"
 	"github.com/gravitational/teleport/lib/utils"
 

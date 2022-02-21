@@ -154,8 +154,8 @@ func getUsersForDb(roleSet services.RoleSet, database types.Database) string {
 
 // splitAllowDeny is a helper function for splitting the users allow/deny map (true/false) into separate, sorted slices.
 func splitAllowDeny(inputMap map[string]bool) ([]string, []string) {
-	allows := make([]string, 0, 0)
-	denies := make([]string, 0, 0)
+	allows := make([]string, 0)
+	denies := make([]string, 0)
 
 	for entity, allow := range inputMap {
 		if allow {
@@ -197,16 +197,15 @@ func listAllowedDenied(set services.RoleSet, getEntities func(role types.Role, c
 		if allowAll {
 			// allow *: all names are allowed, except for those denied. keep explicitly allowed names so user can see them.
 			return splitAllowDeny(entities)
-		} else {
-			// deny *: nothing is allowed. return empty lists.
-			return []string{}, []string{}
 		}
-	} else {
-		// no wildcard in either allow or deny.
-		// return users, but only the allowed ones.
-		allowed, _ := splitAllowDeny(entities)
-		return allowed, []string{}
+		// deny *: nothing is allowed. return empty lists.
+		return []string{}, []string{}
 	}
+
+	// no wildcard in either allow or deny.
+	// return users, but only the allowed ones.
+	allowed, _ := splitAllowDeny(entities)
+	return allowed, []string{}
 }
 
 func listAllowedDeniedDbUsers(set services.RoleSet) ([]string, []string) {
