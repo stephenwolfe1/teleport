@@ -26,7 +26,6 @@ import (
 
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/types"
-	"github.com/gravitational/teleport/api/types/wrappers"
 	"github.com/gravitational/teleport/lib/client"
 	dbprofile "github.com/gravitational/teleport/lib/client/db"
 	"github.com/gravitational/teleport/lib/defaults"
@@ -45,27 +44,8 @@ func onListDatabases(cf *CLIConf) error {
 	}
 
 	var databases []types.Database
-	var roles []types.Role
-
 	err = client.RetryWithRelogin(cf.Context, tc, func() error {
 		databases, err = tc.ListDatabases(cf.Context)
-
-		proxy, err := tc.ConnectToProxy(cf.Context)
-		if err != nil {
-			return trace.Wrap(err)
-		}
-
-		cluster, err := proxy.ConnectToCluster(cf.Context, tc.SiteName, true)
-		if err != nil {
-			return trace.Wrap(err)
-		}
-		defer cluster.Close()
-
-		roles, err = cluster.GetRoles(cf.Context)
-		if err != nil {
-			return trace.Wrap(err)
-		}
-
 		return trace.Wrap(err)
 	})
 
@@ -79,12 +59,45 @@ func onListDatabases(cf *CLIConf) error {
 		return trace.Wrap(err)
 	}
 
-	// effective roleSet
-	userRoles, err := filterRoles(profile.Roles, roles)
-	if err != nil {
-		return trace.Wrap(err)
+	// calculating possible users for db is only done in verbose mode.
+	displayUsersForDb := func(database types.Database) string {
+		return ""
 	}
-	roleSet := interpolateRoles(profile.Traits, userRoles)
+
+	if cf.Verbose {
+		// in case of any errors down the line, indicate that fact.
+		displayUsersForDb = func(database types.Database) string {
+			return "(error: unable to check)"
+		}
+
+		err = client.RetryWithRelogin(cf.Context, tc, func() error {
+			proxy, err := tc.ConnectToProxy(cf.Context)
+			if err != nil {
+				return trace.Wrap(err)
+			}
+
+			cluster, err := proxy.ConnectToCluster(cf.Context, tc.SiteName, true)
+			if err != nil {
+				return trace.Wrap(err)
+			}
+			defer cluster.Close()
+
+			roleSet, err := services.FetchRoles(profile.Roles, cluster, profile.Traits)
+			if err != nil {
+				return trace.Wrap(err)
+			}
+
+			displayUsersForDb = func(database types.Database) string {
+				return getUsersForDb(roleSet, database)
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			log.Debugf("Error while calculating available db users: %v", err)
+		}
+	}
 
 	sort.Slice(databases, func(i, j int) bool {
 		return databases[i].GetName() < databases[j].GetName()
@@ -95,16 +108,17 @@ func onListDatabases(cf *CLIConf) error {
 		return trace.Wrap(err)
 	}
 
-	showDatabases(cf.SiteName, roleSet, databases, activeDatabases, cf.Verbose)
+	showDatabases(cf.SiteName, displayUsersForDb, databases, activeDatabases, cf.Verbose)
 	return nil
 }
 
+// getUsersForDb finds allowed and denied users given user's effective roleSet and database in consideration. The result is a user-readable string.
 func getUsersForDb(roleSet services.RoleSet, database types.Database) string {
-	if roleSet == nil {
+	if len(roleSet) == 0 {
 		return ""
 	}
 
-	allowedUsers, deniedUsers := splitAllowDeny(listAllowedDeniedDbUsers(roleSet))
+	allowedUsers, deniedUsers := listAllowedDeniedDbUsers(roleSet)
 
 	allUsers := make([]string, 0)
 	allUsers = append(allUsers, allowedUsers...)
@@ -121,12 +135,14 @@ func getUsersForDb(roleSet services.RoleSet, database types.Database) string {
 		if err == nil {
 			usersOk = append(usersOk, user)
 		} else {
-			usersBad = append(usersBad, user)
+			if user != types.Wildcard {
+				usersBad = append(usersBad, user)
+			}
 		}
 	}
 
 	if len(usersOk) == 0 {
-		return ""
+		return "(none allowed)"
 	}
 
 	if len(usersBad) == 0 {
@@ -136,36 +152,7 @@ func getUsersForDb(roleSet services.RoleSet, database types.Database) string {
 	return fmt.Sprintf("%v, except: %v", usersOk, usersBad)
 }
 
-func filterRoles(roleNames []string, roles []types.Role) ([]types.Role, error) {
-	mapping := make(map[string]types.Role)
-
-	for _, role := range roles {
-		r := role
-		mapping[role.GetName()] = r
-	}
-
-	filtered := make([]types.Role, 0)
-
-	for _, name := range roleNames {
-		role, ok := mapping[name]
-		if !ok {
-			return nil, trace.Errorf("unable to find role with name: %v", name)
-		}
-		filtered = append(filtered, role)
-	}
-
-	return filtered, nil
-}
-
-func interpolateRoles(traits wrappers.Traits, userRoles []types.Role) services.RoleSet {
-	var interpolatedRoles []types.Role
-	for _, role := range userRoles {
-		interpolatedRoles = append(interpolatedRoles, services.ApplyTraits(role, traits))
-	}
-	roleSet := services.NewRoleSet(interpolatedRoles...)
-	return roleSet
-}
-
+// splitAllowDeny is a helper function for splitting the users allow/deny map (true/false) into separate, sorted slices.
 func splitAllowDeny(inputMap map[string]bool) ([]string, []string) {
 	allows := make([]string, 0, 0)
 	denies := make([]string, 0, 0)
@@ -184,7 +171,10 @@ func splitAllowDeny(inputMap map[string]bool) ([]string, []string) {
 	return allows, denies
 }
 
-func listAllowedDenied(set services.RoleSet, getEntities func(role types.Role, conditionType types.RoleConditionType) []string) map[string]bool {
+// listAllowedDenied works on a given role set and generic entity function getter to return a minimal description of allowed set of names.
+// It is biased towards *allowed* entities (e.g. usernames); It is meant to describe what the user can do, rather than cannot do.
+// For that reason if the user isn't allowed to pick *any* entities, the output will be empty.
+func listAllowedDenied(set services.RoleSet, getEntities func(role types.Role, conditionType types.RoleConditionType) []string) ([]string, []string) {
 	entities := make(map[string]bool)
 
 	// get allowed and denied users. denied users overwrite allowed ones.
@@ -200,31 +190,26 @@ func listAllowedDenied(set services.RoleSet, getEntities func(role types.Role, c
 		}
 	}
 
-	// do we have a wildcard in here?
-	allow, found := entities[types.Wildcard]
+	// do we have a wildcard?
+	allowAll, found := entities[types.Wildcard]
 
-	if !found {
-		// no wildcard anywhere.
-		// return users, but only the allowed ones.
-		entitiesFiltered := make(map[string]bool)
-		for username, allowed := range entities {
-			if allowed {
-				entitiesFiltered[username] = allowed
-			}
-		}
-		return entitiesFiltered
-	} else {
-		// allow *: all names are allowed, except for those denied. keep explicitly allowed names so user can see them.
-		if allow {
-			return entities
+	if found {
+		if allowAll {
+			// allow *: all names are allowed, except for those denied. keep explicitly allowed names so user can see them.
+			return splitAllowDeny(entities)
 		} else {
-			// deny *: nothing is allowed. return empty map.
-			return make(map[string]bool)
+			// deny *: nothing is allowed. return empty lists.
+			return []string{}, []string{}
 		}
+	} else {
+		// no wildcard in either allow or deny.
+		// return users, but only the allowed ones.
+		allowed, _ := splitAllowDeny(entities)
+		return allowed, []string{}
 	}
 }
 
-func listAllowedDeniedDbUsers(set services.RoleSet) map[string]bool {
+func listAllowedDeniedDbUsers(set services.RoleSet) ([]string, []string) {
 	getEntities := func(role types.Role, conditionType types.RoleConditionType) []string {
 		return role.GetDatabaseUsers(conditionType)
 	}
@@ -232,7 +217,7 @@ func listAllowedDeniedDbUsers(set services.RoleSet) map[string]bool {
 	return listAllowedDenied(set, getEntities)
 }
 
-func listAllowedDeniedDbNames(set services.RoleSet) map[string]bool {
+func listAllowedDeniedDbNames(set services.RoleSet) ([]string, []string) {
 	getEntities := func(role types.Role, conditionType types.RoleConditionType) []string {
 		return role.GetDatabaseNames(conditionType)
 	}

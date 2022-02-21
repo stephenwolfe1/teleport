@@ -1528,17 +1528,14 @@ func makeTableWithTruncatedColumn(columnOrder []string, rows [][]string, truncat
 	return t
 }
 
-func showDatabases(clusterFlag string, roleSet services.RoleSet, databases []types.Database, active []tlsca.RouteToDatabase, verbose bool) {
+func showDatabases(clusterFlag string, displayUsersForDb func(database types.Database) string, databases []types.Database, active []tlsca.RouteToDatabase, verbose bool) {
 	if verbose {
 		t := asciitable.MakeTable([]string{"Name", "Description", "Protocol", "Type", "URI", "Users", "Labels", "Connect", "Expires"})
 		for _, database := range databases {
-			users := getUsersForDb(roleSet, database)
-
 			name := database.GetName()
 			var connect string
 			for _, a := range active {
 				if a.ServiceName == name {
-
 					name = formatActiveDB(a)
 					connect = formatConnectCommand(clusterFlag, a)
 				}
@@ -1550,7 +1547,7 @@ func showDatabases(clusterFlag string, roleSet services.RoleSet, databases []typ
 				database.GetProtocol(),
 				database.GetType(),
 				database.GetURI(),
-				users,
+				displayUsersForDb(database),
 				database.LabelsString(),
 				connect,
 				database.Expiry().Format(constants.HumanDateFormatSeconds),

@@ -22,6 +22,7 @@ import (
 	"crypto/rsa"
 	"encoding/pem"
 	"errors"
+	"github.com/gravitational/teleport/lib/services"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -575,6 +576,369 @@ func TestCliCommandBuilderGetConnectCommand(t *testing.T) {
 
 			require.NoError(t, err)
 			require.Equal(t, tt.cmd, got.Args)
+		})
+	}
+}
+
+func Test_getUsersForDb(t *testing.T) {
+	dbStage, err := types.NewDatabaseV3(types.Metadata{
+		Name:   "stage",
+		Labels: map[string]string{"env": "stage"},
+	}, types.DatabaseSpecV3{
+		Protocol: "protocol",
+		URI:      "uri",
+	})
+	require.NoError(t, err)
+
+	dbProd, err := types.NewDatabaseV3(types.Metadata{
+		Name:   "prod",
+		Labels: map[string]string{"env": "prod"},
+	}, types.DatabaseSpecV3{
+		Protocol: "protocol",
+		URI:      "uri",
+	})
+	require.NoError(t, err)
+
+	roleDevStage := &types.RoleV5{
+		Metadata: types.Metadata{Name: "dev-stage", Namespace: apidefaults.Namespace},
+		Spec: types.RoleSpecV5{
+			Allow: types.RoleConditions{
+				Namespaces:     []string{apidefaults.Namespace},
+				DatabaseLabels: types.Labels{"env": []string{"stage"}},
+				DatabaseUsers:  []string{types.Wildcard},
+			},
+			Deny: types.RoleConditions{
+				Namespaces:    []string{apidefaults.Namespace},
+				DatabaseUsers: []string{"superuser"},
+			},
+		},
+	}
+	roleDevProd := &types.RoleV5{
+		Metadata: types.Metadata{Name: "dev-prod", Namespace: apidefaults.Namespace},
+		Spec: types.RoleSpecV5{
+			Allow: types.RoleConditions{
+				Namespaces:     []string{apidefaults.Namespace},
+				DatabaseLabels: types.Labels{"env": []string{"prod"}},
+				DatabaseUsers:  []string{"dev"},
+			},
+		},
+	}
+
+	testCases := []struct {
+		name     string
+		roles    services.RoleSet
+		database types.Database
+		result   string
+	}{
+		{
+			name:     "developer allowed any username in stage database except superuser",
+			roles:    services.RoleSet{roleDevStage, roleDevProd},
+			database: dbStage,
+			result:   "[* dev], except: [superuser]",
+		},
+		{
+			name:     "developer allowed only specific username/database in prod database",
+			roles:    services.RoleSet{roleDevStage, roleDevProd},
+			database: dbProd,
+			result:   "[dev], except: [superuser]",
+		},
+
+		{
+			name:     "roleDevStage x dbStage",
+			roles:    services.RoleSet{roleDevStage},
+			database: dbStage,
+			result:   "[*], except: [superuser]",
+		},
+
+		{
+			name:     "roleDevStage x dbProd",
+			roles:    services.RoleSet{roleDevStage},
+			database: dbProd,
+			result:   "(none allowed)",
+		},
+
+		{
+			name:     "roleDevProd x dbStage",
+			roles:    services.RoleSet{roleDevProd},
+			database: dbStage,
+			result:   "(none allowed)",
+		},
+
+		{
+			name:     "roleDevProd x dbProd",
+			roles:    services.RoleSet{roleDevProd},
+			database: dbProd,
+			result:   "[dev]",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := getUsersForDb(tc.roles, tc.database)
+			require.Equal(t, tc.result, got)
+		})
+	}
+}
+
+func Test_splitAllowDeny(t *testing.T) {
+	type args struct {
+		inputMap map[string]bool
+	}
+	tests := []struct {
+		name      string
+		args      args
+		wantAllow []string
+		wantDeny  []string
+	}{
+		{
+			name:      "empty",
+			args:      args{map[string]bool{}},
+			wantAllow: []string{},
+			wantDeny:  []string{},
+		},
+		{
+			name: "singular",
+			args: args{map[string]bool{
+				"foo": true,
+				"bar": false,
+			}},
+			wantAllow: []string{"foo"},
+			wantDeny:  []string{"bar"},
+		}, {
+			name: "multiple with sort",
+			args: args{map[string]bool{
+				"foo200": true,
+				"foo100": true,
+				"bar300": false,
+				"bar200": false,
+			}},
+			wantAllow: []string{"foo100", "foo200"},
+			wantDeny:  []string{"bar200", "bar300"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAllow, gotDeny := splitAllowDeny(tt.args.inputMap)
+
+			require.Equal(t, tt.wantAllow, gotAllow, "allowed mismatch")
+			require.Equal(t, tt.wantDeny, gotDeny, "denied mismatch")
+		})
+	}
+}
+
+func Test_listAllowedDenied(t *testing.T) {
+	type args struct {
+		set services.RoleSet
+	}
+
+	mkRole := func(name string, spec types.RoleSpecV5) types.Role {
+		role, err := types.NewRoleV5(name, spec)
+		if err != nil {
+			panic(err)
+		}
+		return role
+	}
+
+	allowWildcard := mkRole("allow-*", types.RoleSpecV5{
+		Allow: types.RoleConditions{
+			DatabaseUsers: []string{"*"},
+		},
+	})
+
+	allowSome := mkRole("allow-some", types.RoleSpecV5{
+		Allow: types.RoleConditions{
+			DatabaseUsers: []string{"foo", "bar", "baz"},
+		},
+	})
+
+	denyWildcard := mkRole("deny-*", types.RoleSpecV5{
+		Deny: types.RoleConditions{
+			DatabaseUsers: []string{"*"},
+		},
+	})
+
+	denySome := mkRole("deny-some", types.RoleSpecV5{
+		Deny: types.RoleConditions{
+			DatabaseUsers: []string{"foo", "bar", "moo"},
+		},
+	})
+
+	tests := []struct {
+		name        string
+		args        args
+		wantAllowed []string
+		wantDenied  []string
+	}{
+		{
+			name: "empty",
+			args: args{
+				set: services.NewRoleSet(),
+			},
+			wantAllowed: []string{},
+			wantDenied:  []string{},
+		},
+		{
+			name: "allow *",
+			args: args{
+				set: services.NewRoleSet(allowWildcard),
+			},
+			wantAllowed: []string{"*"},
+			wantDenied:  []string{},
+		},
+		{
+			name: "allow * and some",
+			args: args{
+				set: services.NewRoleSet(allowWildcard, allowSome),
+			},
+			wantAllowed: []string{"*", "bar", "baz", "foo"},
+			wantDenied:  []string{},
+		},
+		{
+			name: "allow *, deny *",
+			args: args{
+				set: services.NewRoleSet(allowWildcard, denyWildcard),
+			},
+			wantAllowed: []string{},
+			wantDenied:  []string{},
+		},
+		{
+			name: "allow *, deny some",
+			args: args{
+				set: services.NewRoleSet(allowWildcard, denySome),
+			},
+			wantAllowed: []string{"*"},
+			wantDenied:  []string{"bar", "foo", "moo"},
+		},
+		{
+			name: "deny *",
+			args: args{
+				set: services.NewRoleSet(denyWildcard),
+			},
+			wantAllowed: []string{},
+			wantDenied:  []string{},
+		},
+		{
+			name: "deny some",
+			args: args{
+				set: services.NewRoleSet(denySome),
+			},
+			wantAllowed: []string{},
+			wantDenied:  []string{},
+		},
+		{
+			name: "allow some, deny some",
+			args: args{
+				set: services.NewRoleSet(allowSome, denySome),
+			},
+			wantAllowed: []string{"baz"},
+			wantDenied:  []string{},
+		},
+	}
+
+	getEntities := func(role types.Role, conditionType types.RoleConditionType) []string {
+		return role.GetDatabaseUsers(conditionType)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotAllowed, gotDenied := listAllowedDenied(tt.args.set, getEntities)
+
+			require.Equal(t, tt.wantAllowed, gotAllowed, "allowed mismatch")
+			require.Equal(t, tt.wantDenied, gotDenied, "denied mismatch")
+		})
+	}
+}
+
+func Test_listAllowedDeniedDbUsers(t *testing.T) {
+	type args struct {
+		set services.RoleSet
+	}
+
+	mkRole := func(name string, spec types.RoleSpecV5) types.Role {
+		role, err := types.NewRoleV5(name, spec)
+		if err != nil {
+			panic(err)
+		}
+		return role
+	}
+
+	allowWildcard := mkRole("allow-*", types.RoleSpecV5{
+		Allow: types.RoleConditions{
+			DatabaseUsers: []string{"*"}, // NOTE: Db *Users*
+		},
+	})
+
+	tests := []struct {
+		name        string
+		args        args
+		wantAllowed []string
+		wantDenied  []string
+	}{
+		{
+			name: "allow *",
+			args: args{
+				set: services.NewRoleSet(allowWildcard),
+			},
+			wantAllowed: []string{"*"},
+			wantDenied:  []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			gotAllowed, gotDenied := listAllowedDeniedDbUsers(tt.args.set)
+
+			require.Equal(t, tt.wantAllowed, gotAllowed, "allowed mismatch")
+			require.Equal(t, tt.wantDenied, gotDenied, "denied mismatch")
+
+		})
+	}
+}
+
+func Test_listAllowedDeniedDbNames(t *testing.T) {
+	type args struct {
+		set services.RoleSet
+	}
+
+	mkRole := func(name string, spec types.RoleSpecV5) types.Role {
+		role, err := types.NewRoleV5(name, spec)
+		if err != nil {
+			panic(err)
+		}
+		return role
+	}
+
+	allowWildcard := mkRole("allow-*", types.RoleSpecV5{
+		Allow: types.RoleConditions{
+			DatabaseNames: []string{"*"}, // NOTE: Db *Names*
+		},
+	})
+
+	tests := []struct {
+		name        string
+		args        args
+		wantAllowed []string
+		wantDenied  []string
+	}{
+		{
+			name: "allow *",
+			args: args{
+				set: services.NewRoleSet(allowWildcard),
+			},
+			wantAllowed: []string{"*"},
+			wantDenied:  []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			gotAllowed, gotDenied := listAllowedDeniedDbNames(tt.args.set)
+
+			require.Equal(t, tt.wantAllowed, gotAllowed, "allowed mismatch")
+			require.Equal(t, tt.wantDenied, gotDenied, "denied mismatch")
+
 		})
 	}
 }
