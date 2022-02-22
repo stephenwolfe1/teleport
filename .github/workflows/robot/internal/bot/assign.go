@@ -19,6 +19,9 @@ package bot
 import (
 	"context"
 	"log"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/gravitational/trace"
 )
@@ -29,7 +32,21 @@ import (
 // set of reviewers determined by: content of the PR, if the author is internal
 // or external, and team they are on.
 func (b *Bot) Assign(ctx context.Context) error {
-	reviewers, err := b.getReviewers(ctx)
+	var err error
+	var reviewers []string
+
+	switch {
+	// If this PR is a backport PR try and assign original reviewers. If the
+	// original reviewers can not be found, then put it through the normal
+	// review process.
+	case isBackport(b.c.Environment.UnsafeBase):
+		reviewers, err = b.getBackportReviewers(ctx)
+		if err != nil {
+			reviewers, err = b.getReviewers(ctx)
+		}
+	default:
+		reviewers, err := b.getReviewers(ctx)
+	}
 	if err != nil {
 		return trace.Wrap(err)
 	}
@@ -57,3 +74,67 @@ func (b *Bot) getReviewers(ctx context.Context) ([]string, error) {
 
 	return b.c.Review.Get(b.c.Environment.Author, docs, code), nil
 }
+
+func (b *Bot) getBackportReviewers(ctx context.Context) ([]string, error) {
+	originalNumber, err := b.parseOriginal(ctx,
+		b.c.Environment.Organization,
+		b.c.Environment.Repository,
+		b.c.Environment.Number)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	reviews, err := b.c.GitHub.ListReviews(ctx,
+		b.c.Environment.Organization,
+		b.c.Environment.Repository,
+		originalNumber)
+	if err != nil {
+		return nil, trace.Wrap(err)
+	}
+
+	var reviewers []string
+	for _, review := range reviews {
+		if review.State != "APPROVED" {
+			continue
+		}
+
+		reviewers = append(reviewers, review.Author)
+	}
+	if len(reviewers) < 2 {
+		return nil, trace.IsNotFound("invalid")
+	}
+
+	return reviewers, nil
+}
+
+func (b *Bot) parseOriginal(ctx context.Context, organization string, repository string, number int) (int, error) {
+	pull, err := b.c.GitHub.Get(ctx,
+		organization,
+		repository,
+		number)
+	if err != nil {
+		return 0, trace.Wrap(err)
+	}
+
+	// Search inside both the title and body.
+	matches := pattern.FindAllStringSubmatch(pull.Title+pull.Body, -1)
+	if len(matches) != 1 {
+		return trace.BadParameter("found multiple matches, unable to find original")
+	}
+
+	number, err := strconv.Atoi(matches[0])
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	return number, nil
+}
+
+func isBackport(unsafeBase string) bool {
+	if strings.HasPrefix(unsafeBase, "branch/v") {
+		return true
+	}
+	return false
+}
+
+var pattern = regexp.MustCompile(`(?m)#[0-9]+`)

@@ -84,7 +84,7 @@ func TestLabel(t *testing.T) {
 						Organization: "foo",
 						Repository:   "bar",
 						Number:       0,
-						UnsafeBranch: test.branch,
+						UnsafeHead:   test.branch,
 					},
 					GitHub: &fakeGithub{
 						test.files,
